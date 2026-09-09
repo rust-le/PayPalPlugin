@@ -214,7 +214,102 @@
    PayPal and nothing on the order is touched, which is what separates this from an amount mismatch: that one
    still answers `200`, because the request *is* processed and the payment really is detached.
 
-8. #### The cart and product page button templates no longer receive `completeUrl`.
+8. #### New, token-based routes were added alongside the cart/payment-page/process-order routes — the old ones are unchanged.
+
+   `sylius_paypal_shop_create_paypal_order_from_cart`, `sylius_paypal_shop_create_paypal_order_from_payment_page`,
+   and `sylius_paypal_shop_complete_paypal_order_from_payment_page` take the Sylius order id as a plain,
+   sequential `{id}` path segment; `sylius_paypal_shop_process_paypal_order` takes it as a plain `orderId` in
+   the JSON body. None of the four checked that the caller had any right to that order — an id is guessable,
+   and knowing it was enough to overwrite a stranger's addresses and customer, cancel their payment, or read
+   out their PayPal order id.
+
+   **This is a security fix, not a deprecation, and it does not rename or repurpose any existing route.** Three
+   new `_by_token` routes were added, resolving the order by its `tokenValue` instead of `{id}`; the original
+   three keep their name, path shape, and `{id}`-based lookup exactly as in 2.0:
+
+   The new routes also get a cleaner, consistent `/paypal/...` path, rather than following the older
+   `/pay-pal-order-.../{id}/...` shape:
+
+   | Original route (unchanged) | New, token-based route |
+   |---|---|
+   | `sylius_paypal_shop_create_paypal_order_from_cart` (`/create-pay-pal-order-from-cart/{id}`) | `sylius_paypal_shop_create_paypal_order_from_cart_by_token` (`/paypal/create-order-from-cart/{tokenValue}`) |
+   | `sylius_paypal_shop_create_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/create`) | `sylius_paypal_shop_create_paypal_order_from_payment_page_by_token` (`/paypal/create-order-from-payment-page/{tokenValue}`) |
+   | `sylius_paypal_shop_complete_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/complete`) | `sylius_paypal_shop_complete_paypal_order_from_payment_page_by_token` (`/paypal/complete-order-from-payment-page/{tokenValue}`) |
+   | `sylius_paypal_shop_process_paypal_order` (body `{"orderId": <int>}`) | same route, now also accepts body `{"tokenValue": "<token>"}` |
+
+   The three v6 button templates (`pay_from_cart_page.html.twig`, `pay_from_payment_page.html.twig`) and
+   `PayPalButtonsController` now generate the `_by_token` URLs. If you overrode any of those templates, or call
+   the original id-based routes directly (custom JS, an API client, a test) expecting them to keep working with
+   a raw id, they still do — nothing changes there. To get the new, IDOR-safe behavior instead, switch your own
+   callers to the `_by_token` routes (or `sylius_paypal_shop_process_paypal_order`'s new `tokenValue` body key)
+   and generate the URL from `$order->getTokenValue()`.
+
+   `GET` was also dropped from `sylius_paypal_shop_create_paypal_order_from_cart` — it only existed so
+   `AddToCartAction`'s redirect could reach it, which made a state-mutating, PayPal-calling endpoint reachable
+   from a plain `<img>` tag. This is independent of the id-vs-token change above: the endpoint is `POST` only
+   now, regardless of which route (id- or token-based) you call.
+
+   **The original, `{id}`-based routes are gated by `sylius_paypal.legacy_id_routes_enabled`** (or the
+   `SYLIUS_PAYPAL_LEGACY_ID_ROUTES_ENABLED` env var), default `false`:
+
+   ```yaml
+   # config/packages/sylius_paypal.yaml
+   sylius_paypal:
+       legacy_id_routes_enabled: true
+   ```
+
+   This flag is **off by default and reopens the exact IDOR the `_by_token` routes close** — anyone who knows
+   or guesses an order id can act on it again. Only turn it on as a temporary bridge while you migrate callers
+   still depending on the id-based routes, and turn it back off once they are updated. The `{id}`-based routes
+   and `sylius_paypal_shop_process_paypal_order`'s `orderId` body key are always registered/accepted; when the
+   flag is off, they resolve to a `404 Not Found` (or, for `process_paypal_order`, an equivalent rejection)
+   rather than not existing, so the behavior at the HTTP layer is the same either way from a caller's
+   perspective — the flag only decides whether the id is actually honored.
+
+   `Sylius\PayPalPlugin\Provider\OrderProviderInterface` gained two new methods for this:
+   - `provideCartByToken(string $tokenValue): OrderInterface`, used by the create/complete-from-cart and
+     create/complete-from-payment-page actions, delegates to Sylius core's own
+     `OrderRepositoryInterface::findCartByTokenValue()` (`state=cart AND tokenValue=...`) — these actions
+     only ever run before checkout completes.
+   - `provideOrderByTokenIncludingCart(string $tokenValue): OrderInterface`, used only by
+     `ProcessPayPalOrderAction`, does a plain, state-agnostic lookup instead. That action must also resolve
+     an order that just completed, in case the buyer's capture request is retried after it already
+     succeeded — `provideCartByToken()`'s cart-only filter would 404 on exactly that retry.
+
+   Two smaller, related changes ship in the same fix:
+   - `Sylius\PayPalPlugin\Exception\OrderNotFoundException` now implements Symfony's `HttpExceptionInterface`
+     and answers `404` instead of an uncaught `500` — this also applies to the pre-existing
+     `provideOrderById()`/`provideOrderByToken()` call sites, not just the new ones.
+   - The Stimulus controller no longer holds or sends a Sylius order id at all (`syliusOrderId` is gone from
+     `PaypalWebSdkController.js`); `PayPalButtonsController` already builds every one of these URLs
+     server-side from a real order, so the browser never needed one.
+
+9. #### An order token is now assigned lazily, exactly when a PayPal placement first needs one.
+
+   The cart-page and payment-page placements above embed the order's `tokenValue` into every URL they
+   generate, but a cart normally has none yet — Sylius core only assigns one once checkout fully completes
+   (`AssignOrderTokenListener` fires on the `sylius_order` workflow's `create` transition, itself only
+   applied on `workflow.sylius_order_checkout.completed.complete`).
+
+   `PayPalButtonsController::renderCartPageButtonsAction()`/`renderPaymentPageButtonsAction()` now assign one
+   themselves, right there, the moment they're about to build the URL — the same lazy, on-demand pattern the
+   product-page Express Checkout flow already used (`AddToCartAction` assigns a token to a brand-new cart
+   the moment it redirects to `sylius_paypal_shop_create_paypal_order_from_cart_by_token`, not before).
+   `PayPalButtonsController` gained two new constructor dependencies for this:
+   `Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface` and an order `ObjectManager` (to flush
+   the newly-assigned token). Without them (during the 2.1 deprecation window), it falls back to throwing a
+   `\RuntimeException` if the order has no token, same as before.
+
+   **Two listeners that used to do this eagerly were removed**, since they're now redundant and ran on every
+   cart mutation or checkout step shop-wide, whether or not a PayPal placement was ever going to be rendered:
+   `Sylius\PayPalPlugin\EventListener\Cart\AssignCartTokenListener` (on Sylius's own `sylius.cart_item_add`
+   event) and `Sylius\PayPalPlugin\EventListener\Workflow\AssignOrderTokenOnCheckoutListener` (on the
+   checkout workflow's `address`, `select_shipping` and `skip_shipping` transitions). If you disabled or
+   overrode `config/services/listeners/cart.xml` or the `assign_order_token_on_checkout` service in
+   `config/services/listeners/workflow.xml`, there is nothing left there to override — the assignment moved
+   into `PayPalButtonsController` itself.
+
+10. #### The cart and product page button templates no longer receive `completeUrl`.
 
    `@SyliusPayPalPlugin/pay_from_cart_page.html.twig` and `@SyliusPayPalPlugin/pay_from_product_page.html.twig`
    redirected to a hardcoded checkout summary URL after approval. They now follow the `return_url` returned by
@@ -228,7 +323,7 @@
    Without that the buyer is sent to the checkout summary of an order that is already completed, which is no
    longer a cart, and with `strict_variables` enabled the template fails to render on the undefined variable.
 
-9. #### The following constructor signatures have gained new optional (nullable) arguments.
+11. #### The following constructor signatures have gained new optional (nullable) arguments.
 
    Following this package's existing deprecation pattern, not passing them is deprecated and will be
    required in 3.0. If you instantiate, decorate, or redefine any of these services with an explicit
@@ -264,8 +359,8 @@
         }
    ```
 
-   Unlike the two above, this one has no usable fallback: the v6 placements cannot be rendered without it,
-   so a controller constructed without it throws a `\RuntimeException` when a placement is rendered.
+   This one has no usable fallback: the v6 placements cannot be rendered without it, so a controller
+   constructed without it throws a `\RuntimeException` when a placement is rendered.
 
    ```diff
     final readonly class ProcessPayPalOrderAction
@@ -277,6 +372,7 @@
    +        private ?OrderProcessorInterface $orderProcessor = null,
    +        private ?RepositoryInterface $shippingMethodRepository = null,
    +        private ?PayPalShippingAddressFactoryInterface $shippingAddressFactory = null,
+   +        private ?bool $legacyIdRoutesEnabled = null,
         ) {
         }
    ```
@@ -289,14 +385,71 @@
    +    <argument type="service" id="sylius.order_processing.order_processor" />
    +    <argument type="service" id="sylius.repository.shipping_method" />
    +    <argument type="service" id="sylius_paypal.factory.paypal_shipping_address" />
+   +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
     </service>
    ```
 
    The first three throw a `\RuntimeException` when they are actually needed — generating a return URL,
-   completing the order, or detaching a mismatched payment. The last two degrade instead: the action behaves
+   completing the order, or detaching a mismatched payment. The next two degrade instead: the action behaves
    as it did in 2.0, which means the shipping method the buyer chose in the wallet is not applied and the
    region is not stored. The first of those two fails the amount check and sends the buyer back to the
-   checkout instead of the thank-you page.
+   checkout instead of the thank-you page. `$legacyIdRoutesEnabled` is treated as `false` when not passed, the
+   same secure default as an explicit `false` — see the legacy-routes entry above.
+
+   ```diff
+    final readonly class CreatePayPalOrderFromCartAction
+    {
+        public function __construct(
+            // ...
+   +        private ?bool $legacyIdRoutesEnabled = null,
+        ) {
+        }
+   ```
+
+   ```diff
+    <service id="sylius_paypal.controller.create_paypal_order_from_cart" class="Sylius\PayPalPlugin\Controller\CreatePayPalOrderFromCartAction">
+        <!-- ... -->
+   +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+    </service>
+   ```
+
+   ```diff
+    final readonly class CreatePayPalOrderFromPaymentPageAction
+    {
+        public function __construct(
+            // ...
+   +        private ?bool $legacyIdRoutesEnabled = null,
+        ) {
+        }
+   ```
+
+   ```diff
+    <service id="sylius_paypal.controller.create_paypal_order_from_payment_page" class="Sylius\PayPalPlugin\Controller\CreatePayPalOrderFromPaymentPageAction">
+        <!-- ... -->
+   +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+    </service>
+   ```
+
+   ```diff
+    final readonly class CompletePayPalOrderFromPaymentPageAction
+    {
+        public function __construct(
+            // ...
+   +        private ?bool $legacyIdRoutesEnabled = null,
+        ) {
+        }
+   ```
+
+   ```diff
+    <service id="sylius_paypal.controller.complete_paypal_order_from_payment_page" class="Sylius\PayPalPlugin\Controller\CompletePayPalOrderFromPaymentPageAction">
+        <!-- ... -->
+   +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+    </service>
+   ```
+
+   All four fall back to `false` when not passed — the same secure default as an explicit `false` — so an
+   existing explicit service redefinition simply keeps rejecting the legacy id-based calling convention until
+   you opt in.
 
    ```diff
     final readonly class CreateOrderApi
@@ -336,7 +489,7 @@
    the providers it already holds. For `CreateOrderApi` that means an order carrying neither the return and
    cancel URLs nor the shipping callback, so the wallet falls back to its plain flow with no shipping options.
 
-10. #### The PayPal order payload is now assembled by factories.
+12. #### The PayPal order payload is now assembled by factories.
 
    `Sylius\PayPalPlugin\Api\CreateOrderApi` and `Sylius\PayPalPlugin\Api\UpdateOrderApi` no longer read the
    order, the gateway config or the router themselves — they ask a factory for the payload and send it. Two
@@ -357,7 +510,7 @@
    This is where to hook in if you need to change what reaches PayPal — overriding `CreateOrderApi` for that
    is no longer necessary.
 
-11. #### The plugin now caches in its own pool instead of the application's `cache.app`.
+13. #### The plugin now caches in its own pool instead of the application's `cache.app`.
 
    Both places where the plugin caches — the PayPal callback certificates used to verify the shipping
    callback signature, and the cooldown that rate-limits webhook id re-resolution — wrote to `cache.app`,
@@ -370,10 +523,9 @@
 
    Two consequences worth knowing:
 
-   Existing entries are not migrated. The new namespace starts cold, which costs one extra certificate
+   - Existing entries are not migrated. The new namespace starts cold, which costs one extra certificate
      download and resets the webhook id refresh cooldown once.
-
-   Clearing `sylius_paypal.cache` drops both the certificates and the cooldown locks, which allows one
+   - Clearing `sylius_paypal.cache` drops both the certificates and the cooldown locks, which allows one
      additional webhook id refresh burst. Clear it per concern only if you split the pool yourself.
 
    To put the plugin's cache on a different backend than the rest of the application, redefine the service
@@ -386,7 +538,7 @@
            tags: ['cache.pool']
    ```
 
-12. #### The PayPal payment page now runs on Web SDK v6, inside the shop layout.
+14. #### The PayPal payment page now runs on Web SDK v6, inside the shop layout.
 
    `@SyliusPayPalPlugin/pay_with_paypal.html.twig` was a standalone HTML document that loaded PayPal's JS
    SDK v5 and built a PayPal button and Hosted Fields from inline script. It now extends
@@ -422,7 +574,7 @@
 
    Then `yarn install && yarn build`.
 
-13. #### Card payments are now refused when 3D Secure does not authorise them.
+15. #### Card payments are now refused when 3D Secure does not authorise them.
 
    The card path used to decide the authentication outcome in the browser and the capture endpoint trusted
    it, so a capture could be requested without passing the challenge. `sylius_paypal_shop_complete_paypal_order`
@@ -442,7 +594,7 @@
    PayPal order the payment does not carry. The identity check is skipped when the request body does not
    name one, so existing callers that post no body are unaffected.
 
-14. #### `sylius_paypal_shop_create_paypal_order` now ends the previous payment attempt.
+16. #### `sylius_paypal_shop_create_paypal_order` now ends the previous payment attempt.
 
    The payment page carries two funding sources, so a buyer can start a PayPal attempt, abandon it and then
    submit the card form. Starting an attempt now cancels a PayPal payment left in `processing` before
@@ -453,7 +605,7 @@
    When no payment awaits payment the endpoint answers `409` instead of raising a `TypeError`, and the
    response carries `orderId` next to the existing `orderID`, with the same value.
 
-15. #### The following signatures changed.
+17. #### The following signatures changed.
 
    `PayPalWebSdkConfigurationProviderInterface::getInstanceConfig()` takes the SDK component list and an
    optional locale. Both are optional and default to what the three button placements already send, so
@@ -498,7 +650,14 @@
    calls, the v6 instance configuration including the `card-fields` component, and the order being paid
    for. Decorate or replace it to change what the page receives without replacing the controller.
 
-16. #### The created PayPal order now carries full line items, an amount breakdown, `custom_id`/`invoice_id`,
+   `Sylius\PayPalPlugin\Controller\AddToCartAction`: `?OrderTokenAssignerInterface $orderTokenAssigner = null`
+   — a cart just created by this action has no `tokenValue` yet (`AssignOrderTokenListener` only assigns one on
+   a checkout *transition*, not on order creation), and the redirect that follows now needs one, per the entry
+   above. No usable fallback: the action throws a `\RuntimeException` rather than redirect to a URL that could
+   never resolve. If you have redefined the `sylius_paypal.controller.add_to_cart` service with an explicit
+   argument list, add `Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface` to it.
+
+18. #### The created PayPal order now carries full line items, an amount breakdown, `custom_id`/`invoice_id`,
    and an enriched `experience_context`.
 
    Following the PayPal SDD, the `v2/checkout/orders` payload - now assembled by `PayPalOrderFactory` and
@@ -533,14 +692,14 @@
      per-attempt reference id to that number so a retried payment never collides on the value PayPal rejects
      when duplicated.
 
-17. #### `PayPalItemDataProvider` gained an optional `router` argument.
+19. #### `PayPalItemDataProvider` gained an optional `router` argument.
 
    `Sylius\PayPalPlugin\Provider\PayPalItemDataProvider` now takes a
    `Symfony\Component\Routing\Generator\UrlGeneratorInterface` (the `router` service) as an optional last
    constructor argument, used to build the item product URLs. Omitting it is deprecated and the provider then
    skips the `url` field; if you instantiate or decorate the provider yourself, pass the `router` service.
 
-18. #### `PayPalPurchaseUnit` and `PayPalOrder` model constructors changed.
+20. #### `PayPalPurchaseUnit` and `PayPalOrder` model constructors changed.
 
    `Sylius\PayPalPlugin\Model\PayPalPurchaseUnit` gained a trailing optional `?string $customId = null`
    argument; existing positional calls keep working.
