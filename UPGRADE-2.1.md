@@ -223,26 +223,33 @@
    and knowing it was enough to overwrite a stranger's addresses and customer, cancel their payment, or read
    out their PayPal order id.
 
-   **This is a security fix, not a deprecation, and it does not rename or repurpose any existing route.** Three
-   new `_by_token` routes were added, resolving the order by its `tokenValue` instead of `{id}`; the original
-   three keep their name, path shape, and `{id}`-based lookup exactly as in 2.0:
+   Three new `_by_token` routes were added, resolving the order by its `tokenValue` instead of `{id}`; the
+   original three keep their name, path shape, and `{id}`-based lookup exactly as in 2.0, and no existing
+   route was renamed or repurposed:
 
    The new routes also get a cleaner, consistent `/paypal/...` path, rather than following the older
    `/pay-pal-order-.../{id}/...` shape:
 
    | Original route (unchanged) | New, token-based route |
    |---|---|
-   | `sylius_paypal_shop_create_paypal_order_from_cart` (`/create-pay-pal-order-from-cart/{id}`) | `sylius_paypal_shop_create_paypal_order_from_cart_by_token` (`/paypal/create-order-from-cart/{tokenValue}`) |
-   | `sylius_paypal_shop_create_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/create`) | `sylius_paypal_shop_create_paypal_order_from_payment_page_by_token` (`/paypal/create-order-from-payment-page/{tokenValue}`) |
-   | `sylius_paypal_shop_complete_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/complete`) | `sylius_paypal_shop_complete_paypal_order_from_payment_page_by_token` (`/paypal/complete-order-from-payment-page/{tokenValue}`) |
+   | `sylius_paypal_shop_create_paypal_order_from_cart` (`/create-pay-pal-order-from-cart/{id}`) | `sylius_paypal_shop_create_paypal_order_from_cart_by_token` (`/paypal/create-order-from-cart[/{tokenValue}]`) |
+   | `sylius_paypal_shop_create_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/create`) | `sylius_paypal_shop_create_paypal_order_from_payment_page_by_token` (`/paypal/create-order-from-payment-page[/{tokenValue}]`) |
+   | `sylius_paypal_shop_complete_paypal_order_from_payment_page` (`/pay-pal-order-payment-page/{id}/complete`) | `sylius_paypal_shop_complete_paypal_order_from_payment_page_by_token` (`/paypal/complete-order-from-payment-page[/{tokenValue}]`) |
    | `sylius_paypal_shop_process_paypal_order` (body `{"orderId": <int>}`) | same route, now also accepts body `{"tokenValue": "<token>"}` |
 
-   The three v6 button templates (`pay_from_cart_page.html.twig`, `pay_from_payment_page.html.twig`) and
-   `PayPalButtonsController` now generate the `_by_token` URLs. If you overrode any of those templates, or call
-   the original id-based routes directly (custom JS, an API client, a test) expecting them to keep working with
-   a raw id, they still do — nothing changes there. To get the new, IDOR-safe behavior instead, switch your own
-   callers to the `_by_token` routes (or `sylius_paypal_shop_process_paypal_order`'s new `tokenValue` body key)
-   and generate the URL from `$order->getTokenValue()`.
+   `{tokenValue}` on the three `_by_token` routes is optional, not just an alternative to `{id}`: called with
+   an explicit token, the route resolves that exact cart, same as before; called with none, it resolves
+   *the current cart* from `sylius.context.cart` and assigns it a token if it doesn't have one yet — the same
+   shape `sylius_paypal_shop_add_to_cart` already used for the product-page placement. This is what lets the
+   button-rendering controller stay a pure renderer: `PayPalButtonsController` no longer assigns a token or
+   calls `flush()` itself, and the three v6 button templates (`pay_from_cart_page.html.twig`,
+   `pay_from_payment_page.html.twig`) now generate these three URLs with no `tokenValue` at all. The order
+   gains a token the first time one of these POST endpoints actually runs, not when the page is rendered — a
+   plain `GET` render never writes to the database. If you overrode any of those templates, or call the
+   original id-based routes directly (custom JS, an API client, a test) expecting them to keep working with a
+   raw id, they still do — nothing changes there. To call the new routes yourself with a specific, already-known
+   order, pass its `tokenValue`; to act on the current cart, call them with no `tokenValue` and read the token
+   back from the JSON response's `tokenValue` key.
 
    `GET` was also dropped from `sylius_paypal_shop_create_paypal_order_from_cart` — it only existed so
    `AddToCartAction`'s redirect could reach it, which made a state-mutating, PayPal-calling endpoint reachable
@@ -266,6 +273,14 @@
    rather than not existing, so the behavior at the HTTP layer is the same either way from a caller's
    perspective — the flag only decides whether the id is actually honored.
 
+   **The flag only keeps the `{id}`-based HTTP routes reachable — it does not restore the old, pre-2.1
+   client-side behavior.** `PaypalWebSdkController.js` and the three v6 button templates shipped changed in
+   this same release, regardless of the flag: they always call the token-based routes described above, never
+   the `{id}`-based ones. Turning the flag on only helps a caller that talks to these routes directly and
+   bypasses this package's own JS/templates entirely — a custom integration, another script, or a test build
+   against the 2.0 contract. A shop using the package's own default placements gets the new, secure, token-based
+   flow either way; there is no supported way to make the default placements fall back to id-based calls.
+
    `Sylius\PayPalPlugin\Provider\OrderProviderInterface` gained two new methods for this:
    - `provideCartByToken(string $tokenValue): OrderInterface`, used by the create/complete-from-cart and
      create/complete-from-payment-page actions, delegates to Sylius core's own
@@ -284,21 +299,26 @@
      `PaypalWebSdkController.js`); `PayPalButtonsController` already builds every one of these URLs
      server-side from a real order, so the browser never needed one.
 
-9. #### An order token is now assigned lazily, exactly when a PayPal placement first needs one.
+9. #### An order token is now assigned lazily, exactly when a PayPal placement first needs one — from the POST action, not the page render.
 
-   The cart-page and payment-page placements above embed the order's `tokenValue` into every URL they
-   generate, but a cart normally has none yet — Sylius core only assigns one once checkout fully completes
-   (`AssignOrderTokenListener` fires on the `sylius_order` workflow's `create` transition, itself only
-   applied on `workflow.sylius_order_checkout.completed.complete`).
+   A cart normally has no `tokenValue` yet — Sylius core only assigns one once checkout fully completes
+   (`AssignOrderTokenListener` fires on the `sylius_order` workflow's `create` transition, itself only applied
+   on `workflow.sylius_order_checkout.completed.complete`). The cart-page and payment-page placements need one
+   earlier than that, to build their `_by_token` URLs.
 
-   `PayPalButtonsController::renderCartPageButtonsAction()`/`renderPaymentPageButtonsAction()` now assign one
-   themselves, right there, the moment they're about to build the URL — the same lazy, on-demand pattern the
-   product-page Express Checkout flow already used (`AddToCartAction` assigns a token to a brand-new cart
-   the moment it redirects to `sylius_paypal_shop_create_paypal_order_from_cart_by_token`, not before).
-   `PayPalButtonsController` gained two new constructor dependencies for this:
-   `Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface` and an order `ObjectManager` (to flush
-   the newly-assigned token). Without them (during the 2.1 deprecation window), it falls back to throwing a
-   `\RuntimeException` if the order has no token, same as before.
+   `PayPalButtonsController` does **not** assign it: it only ever reads the order to render the page (currency,
+   locale), so a plain `GET` never writes to the database. Instead, `CreatePayPalOrderFromCartAction` and
+   `CreatePayPalOrderFromPaymentPageAction` assign it themselves, the moment their route is actually hit with no
+   `tokenValue` — resolving the current cart from `sylius.context.cart` and calling
+   `OrderTokenAssignerInterface::assignTokenValueIfNotSet()` on it, the same lazy, on-demand pattern the
+   product-page Express Checkout flow already used (`AddToCartAction` assigns a token to a brand-new cart the
+   moment it redirects to `sylius_paypal_shop_create_paypal_order_from_cart_by_token`). See the token-based
+   routes entry above for the full request shape. Both actions gained two new constructor dependencies for
+   this: `Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface` and
+   `Sylius\Component\Order\Context\CartContextInterface`; `CompletePayPalOrderFromPaymentPageAction` gained
+   only the latter, to resolve the same cart again for the capture step. Without them (during the 2.1
+   deprecation window), calling any of the three routes without an explicit `tokenValue` throws a
+   `\RuntimeException` instead of resolving the current cart.
 
    **Two listeners that used to do this eagerly were removed**, since they're now redundant and ran on every
    cart mutation or checkout step shop-wide, whether or not a PayPal placement was ever going to be rendered:
@@ -307,7 +327,7 @@
    checkout workflow's `address`, `select_shipping` and `skip_shipping` transitions). If you disabled or
    overrode `config/services/listeners/cart.xml` or the `assign_order_token_on_checkout` service in
    `config/services/listeners/workflow.xml`, there is nothing left there to override — the assignment moved
-   into `PayPalButtonsController` itself.
+   into the two order-creation actions themselves.
 
 10. #### The cart and product page button templates no longer receive `completeUrl`.
 
@@ -402,6 +422,8 @@
         public function __construct(
             // ...
    +        private ?bool $legacyIdRoutesEnabled = null,
+   +        private ?CartContextInterface $cartContext = null,
+   +        private ?OrderTokenAssignerInterface $orderTokenAssigner = null,
         ) {
         }
    ```
@@ -410,6 +432,8 @@
     <service id="sylius_paypal.controller.create_paypal_order_from_cart" class="Sylius\PayPalPlugin\Controller\CreatePayPalOrderFromCartAction">
         <!-- ... -->
    +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+   +    <argument type="service" id="sylius.context.cart" />
+   +    <argument type="service" id="Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface" />
     </service>
    ```
 
@@ -419,6 +443,8 @@
         public function __construct(
             // ...
    +        private ?bool $legacyIdRoutesEnabled = null,
+   +        private ?CartContextInterface $cartContext = null,
+   +        private ?OrderTokenAssignerInterface $orderTokenAssigner = null,
         ) {
         }
    ```
@@ -427,6 +453,8 @@
     <service id="sylius_paypal.controller.create_paypal_order_from_payment_page" class="Sylius\PayPalPlugin\Controller\CreatePayPalOrderFromPaymentPageAction">
         <!-- ... -->
    +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+   +    <argument type="service" id="sylius.context.cart" />
+   +    <argument type="service" id="Sylius\Component\Core\TokenAssigner\OrderTokenAssignerInterface" />
     </service>
    ```
 
@@ -436,6 +464,7 @@
         public function __construct(
             // ...
    +        private ?bool $legacyIdRoutesEnabled = null,
+   +        private ?CartContextInterface $cartContext = null,
         ) {
         }
    ```
@@ -444,8 +473,13 @@
     <service id="sylius_paypal.controller.complete_paypal_order_from_payment_page" class="Sylius\PayPalPlugin\Controller\CompletePayPalOrderFromPaymentPageAction">
         <!-- ... -->
    +    <argument>%sylius_paypal.legacy_id_routes_enabled%</argument>
+   +    <argument type="service" id="sylius.context.cart" />
     </service>
    ```
+
+   `CompletePayPalOrderFromPaymentPageAction` only needs `CartContextInterface`, not the token assigner — by
+   the time a buyer approves the payment, `CreatePayPalOrderFromPaymentPageAction` has already assigned one;
+   this action only ever needs to resolve the same cart again, not assign anything itself.
 
    All four fall back to `false` when not passed — the same secure default as an explicit `false` — so an
    existing explicit service redefinition simply keeps rejecting the legacy id-based calling convention until
@@ -710,7 +744,7 @@
    `shipping_preference` is `GET_FROM_FILE`) or `application_context` otherwise. Build the `experienceContext`
    through `ExperienceContextProviderInterface`. If you construct `PayPalOrder` yourself, update the call.
 
-19. #### Pay Later has a real button, and `<paypal-message>` finally renders real content.
+21. #### Pay Later has a real button, and `<paypal-message>` finally renders real content.
 
    The Pay Later payment method now has its own v6 button (`createPayLaterOneTimePaymentSession`), shown on
    the product, cart, and checkout payment-page placements whenever `findEligibleMethods()` says the buyer
