@@ -2,7 +2,7 @@ import { Controller } from '@hotwired/stimulus';
 import { loadWebSdkOnce } from '../scripts/paypal-web-sdk';
 
 export default class extends Controller {
-    static targets = ['paypalButton', 'payLaterButton'];
+    static targets = ['paypalButton', 'payLaterButton', 'venmoButton'];
 
     static values = {
         scriptUrl: String,
@@ -16,9 +16,12 @@ export default class extends Controller {
         errorUrl: String,
         loadingSelector: String,
         payLaterEnabled: Boolean,
+        venmoEnabled: Boolean,
     };
 
     syliusOrderId = null;
+
+    payPalOrderId = null;
 
     connect() {
         this.init();
@@ -45,6 +48,10 @@ export default class extends Controller {
                 this.payLaterButtonTarget.productCode = payLaterDetails.productCode;
                 this.payLaterButtonTarget.countryCode = payLaterDetails.countryCode;
                 this.wireUpButton(this.payLaterButtonTarget, sdkInstance.createPayLaterOneTimePaymentSession(this.buildSessionOptions()));
+            }
+
+            if (this.venmoEnabledValue && this.hasVenmoButtonTarget && paymentMethods.isEligible('venmo')) {
+                this.wireUpButton(this.venmoButtonTarget, sdkInstance.createVenmoOneTimePaymentSession(this.buildSessionOptions()));
             }
         } catch (error) {
             console.error('PayPal Web SDK initialization error:', error);
@@ -82,7 +89,7 @@ export default class extends Controller {
             document.querySelector(this.loadingSelectorValue)?.style.setProperty('display', 'block');
         }
 
-        if (response.status === 400) {
+        if (!response.ok) {
             window.location.reload();
 
             return;
@@ -90,6 +97,7 @@ export default class extends Controller {
 
         const data = await response.json();
         this.syliusOrderId = data.id;
+        this.payPalOrderId = data.orderId;
 
         return { orderId: data.orderId };
     }
@@ -114,7 +122,11 @@ export default class extends Controller {
     }
 
     async onError(error) {
-        await fetch(this.errorUrlValue, { method: 'post', headers: {}, body: error });
+        await fetch(this.errorUrlValue, {
+            method: 'post',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ error: String(error), payPalOrderId: this.payPalOrderId }),
+        });
         window.location.reload();
     }
 }
