@@ -1,8 +1,10 @@
 import { Controller } from '@hotwired/stimulus';
 import { loadWebSdkOnce } from '../scripts/paypal-web-sdk';
 
+let sdkInstancePromise = null;
+
 export default class extends Controller {
-    static targets = ['paypalButton', 'payLaterButton'];
+    static targets = ['paypalButton', 'payLaterButton', 'venmoButton'];
 
     static values = {
         scriptUrl: String,
@@ -16,38 +18,101 @@ export default class extends Controller {
         errorUrl: String,
         loadingSelector: String,
         payLaterEnabled: Boolean,
+        venmoEnabled: Boolean,
     };
 
     syliusOrderId = null;
 
-    connect() {
-        this.init();
-    }
+    payPalOrderId = null;
 
-    async init() {
+    initialized = false;
+
+    wiredTargets = new Set();
+
+    async connect() {
         try {
             await loadWebSdkOnce(this.scriptUrlValue);
 
-            const sdkInstance = await window.paypal.createInstance(this.instanceConfigValue);
+            sdkInstancePromise ??= window.paypal.createInstance(this.instanceConfigValue);
+            this.sdkInstance = await sdkInstancePromise;
 
-            const eligibilityRequest = { currencyCode: this.currencyCodeValue };
-            if (this.hasAmountValue && this.amountValue !== '') {
-                eligibilityRequest.amount = this.amountValue;
+            await this.refreshEligibility();
+        } catch (error) {
+            console.error('PayPal Web SDK initialization error:', error);
+        } finally {
+            this.initialized = true;
+        }
+    }
+
+    amountValueChanged() {
+        if (!this.initialized) {
+            return;
+        }
+
+        this.refreshEligibility();
+    }
+
+    currencyCodeValueChanged() {
+        if (!this.initialized) {
+            return;
+        }
+
+        this.refreshEligibility();
+    }
+
+    async refreshEligibility() {
+        const eligibilityRequest = { currencyCode: this.currencyCodeValue };
+        if (this.hasAmountValue && this.amountValue !== '') {
+            eligibilityRequest.amount = this.amountValue;
+        }
+
+        let paymentMethods;
+        try {
+            paymentMethods = await this.sdkInstance.findEligibleMethods(eligibilityRequest);
+        } catch (error) {
+            console.error('PayPal eligibility check error:', error);
+
+            return;
+        }
+
+        try {
+            if (!this.wiredTargets.has('paypal') && this.hasPaypalButtonTarget && paymentMethods.isEligible('paypal')) {
+                this.wiredTargets.add('paypal');
+                this.wireUpButton(this.paypalButtonTarget, this.sdkInstance.createPayPalOneTimePaymentSession(this.buildSessionOptions()));
             }
-            const paymentMethods = await sdkInstance.findEligibleMethods(eligibilityRequest);
+        } catch (error) {
+            console.error('PayPal button setup error:', error);
+        }
 
-            if (paymentMethods.isEligible('paypal')) {
-                this.wireUpButton(this.paypalButtonTarget, sdkInstance.createPayPalOneTimePaymentSession(this.buildSessionOptions()));
-            }
-
-            if (this.payLaterEnabledValue && this.hasPayLaterButtonTarget && paymentMethods.isEligible('paylater')) {
+        try {
+            if (
+                !this.wiredTargets.has('paylater') &&
+                this.payLaterEnabledValue &&
+                this.hasPayLaterButtonTarget &&
+                paymentMethods.isEligible('paylater')
+            ) {
+                this.wiredTargets.add('paylater');
                 const payLaterDetails = paymentMethods.getDetails('paylater');
                 this.payLaterButtonTarget.productCode = payLaterDetails.productCode;
                 this.payLaterButtonTarget.countryCode = payLaterDetails.countryCode;
-                this.wireUpButton(this.payLaterButtonTarget, sdkInstance.createPayLaterOneTimePaymentSession(this.buildSessionOptions()));
+                this.wireUpButton(this.payLaterButtonTarget, this.sdkInstance.createPayLaterOneTimePaymentSession(this.buildSessionOptions()));
             }
         } catch (error) {
-            console.error('PayPal Web SDK initialization error:', error);
+            console.error('Pay Later button setup error:', error);
+        }
+
+        try {
+            if (
+                !this.wiredTargets.has('venmo') &&
+                this.venmoEnabledValue &&
+                this.hasVenmoButtonTarget &&
+                paymentMethods.isEligible('venmo')
+            ) {
+                this.wiredTargets.add('venmo');
+                this.wireUpButton(this.venmoButtonTarget, this.sdkInstance.createVenmoOneTimePaymentSession(this.buildSessionOptions()), 'venmo');
+            }
+        } catch (error) {
+            console.error('Venmo button setup error:', error);
         }
     }
 
@@ -59,30 +124,35 @@ export default class extends Controller {
         };
     }
 
-    wireUpButton(buttonTarget, paymentSession) {
+    wireUpButton(buttonTarget, paymentSession, paymentSource = null) {
         buttonTarget.removeAttribute('hidden');
         buttonTarget.addEventListener('click', async () => {
             try {
-                await paymentSession.start({ presentationMode: 'auto' }, this.createOrder());
+                await paymentSession.start({ presentationMode: 'auto' }, this.createOrder(paymentSource));
             } catch (error) {
                 console.error('paymentSession.start() failed:', error);
             }
         });
     }
 
-    async createOrder() {
+    async createOrder(paymentSource = null) {
         const requestInit = { method: 'post' };
         if (this.hasAddToCartFormSelectorValue && this.addToCartFormSelectorValue !== '') {
             requestInit.body = new FormData(document.querySelector(this.addToCartFormSelectorValue));
         }
 
-        const response = await fetch(this.createOrderUrlValue, requestInit);
+        const url = new URL(this.createOrderUrlValue, window.location.origin);
+        if (paymentSource !== null) {
+            url.searchParams.set('paymentSource', paymentSource);
+        }
+
+        const response = await fetch(url, requestInit);
 
         if (this.hasLoadingSelectorValue && this.loadingSelectorValue !== '') {
             document.querySelector(this.loadingSelectorValue)?.style.setProperty('display', 'block');
         }
 
-        if (response.status === 400) {
+        if (!response.ok) {
             window.location.reload();
 
             return;
@@ -90,6 +160,7 @@ export default class extends Controller {
 
         const data = await response.json();
         this.syliusOrderId = data.id;
+        this.payPalOrderId = data.orderId;
 
         return { orderId: data.orderId };
     }
@@ -114,7 +185,11 @@ export default class extends Controller {
     }
 
     async onError(error) {
-        await fetch(this.errorUrlValue, { method: 'post', headers: {}, body: error });
+        await fetch(this.errorUrlValue, {
+            method: 'post',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ error: String(error), payPalOrderId: this.payPalOrderId }),
+        });
         window.location.reload();
     }
 }

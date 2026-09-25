@@ -34,6 +34,47 @@ final class PayPalConfigurationTypeTest extends TypeTestCase
         self::assertTrue($form->get('messaging_enabled')->getData());
     }
 
+    public function test_the_google_pay_toggle_defaults_to_unchecked_for_a_new_payment_method(): void
+    {
+        $form = $this->factory->create(PayPalConfigurationType::class, $this->baseConfig());
+
+        self::assertFalse($form->get('google_pay_enabled')->getData());
+    }
+
+    public function test_the_venmo_toggle_defaults_to_unchecked_for_a_new_payment_method(): void
+    {
+        $form = $this->factory->create(PayPalConfigurationType::class, $this->baseConfig());
+
+        self::assertFalse($form->get('venmo_enabled')->getData());
+    }
+
+    public function test_the_google_pay_toggle_stays_true_after_being_resubmitted(): void
+    {
+        $form = $this->factory->create(PayPalConfigurationType::class, $this->baseConfig());
+
+        $form->submit(array_merge($this->submittedFields(), ['google_pay_enabled' => '1']));
+
+        self::assertTrue($form->isValid());
+        self::assertTrue($form->getData()['google_pay_enabled']);
+    }
+
+    public function test_the_trustly_toggle_defaults_to_unchecked_for_a_new_payment_method(): void
+    {
+        $form = $this->factory->create(PayPalConfigurationType::class, $this->baseConfig());
+
+        self::assertFalse($form->get('trustly_enabled')->getData());
+    }
+
+    public function test_the_trustly_toggle_stays_true_after_being_resubmitted(): void
+    {
+        $form = $this->factory->create(PayPalConfigurationType::class, $this->baseConfig());
+
+        $form->submit(array_merge($this->submittedFields(), ['trustly_enabled' => '1']));
+
+        self::assertTrue($form->isValid());
+        self::assertTrue($form->getData()['trustly_enabled']);
+    }
+
     #[Test]
     public function an_unchecked_toggle_is_correctly_submitted_as_false(): void
     {
@@ -43,7 +84,10 @@ final class PayPalConfigurationTypeTest extends TypeTestCase
 
         self::assertTrue($form->isValid());
         self::assertFalse($form->getData()['pay_later_enabled']);
+        self::assertFalse($form->getData()['venmo_enabled']);
         self::assertFalse($form->getData()['messaging_enabled']);
+        self::assertFalse($form->getData()['google_pay_enabled']);
+        self::assertFalse($form->getData()['trustly_enabled']);
     }
 
     #[Test]
@@ -53,11 +97,13 @@ final class PayPalConfigurationTypeTest extends TypeTestCase
 
         $form->submit(array_merge($this->submittedFields(), [
             'pay_later_enabled' => '1',
+            'venmo_enabled' => '1',
             'messaging_enabled' => '1',
         ]));
 
         self::assertTrue($form->isValid());
         self::assertTrue($form->getData()['pay_later_enabled']);
+        self::assertTrue($form->getData()['venmo_enabled']);
         self::assertTrue($form->getData()['messaging_enabled']);
     }
 

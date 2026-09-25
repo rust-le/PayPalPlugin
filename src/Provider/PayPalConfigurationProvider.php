@@ -18,6 +18,7 @@ use Sylius\Component\Core\Model\ChannelInterface;
 use Sylius\Component\Core\Model\PaymentMethodInterface;
 use Sylius\Component\Core\Repository\PaymentMethodRepositoryInterface;
 use Sylius\PayPalPlugin\DependencyInjection\SyliusPayPalExtension;
+use Sylius\PayPalPlugin\Model\RedirectPaymentSource;
 use Webmozart\Assert\Assert;
 
 final readonly class PayPalConfigurationProvider implements PayPalConfigurationProviderInterface, PayPalFundingSourcesConfigurationProviderInterface
@@ -50,7 +51,26 @@ final readonly class PayPalConfigurationProvider implements PayPalConfigurationP
 
     public function isMessagingEnabled(ChannelInterface $channel): bool
     {
+        if (!$this->isPayLaterEnabled($channel)) {
+            return false;
+        }
+
         return (bool) ($this->getPayPalPaymentMethodConfig($channel)['messaging_enabled'] ?? true);
+    }
+
+    public function isVenmoEnabled(ChannelInterface $channel): bool
+    {
+        return (bool) ($this->getPayPalPaymentMethodConfig($channel)['venmo_enabled'] ?? false);
+    }
+
+    public function isGooglePayEnabled(ChannelInterface $channel): bool
+    {
+        return (bool) ($this->getPayPalPaymentMethodConfig($channel)['google_pay_enabled'] ?? false);
+    }
+
+    public function isTrustlyEnabled(ChannelInterface $channel): bool
+    {
+        return (bool) ($this->getPayPalPaymentMethodConfig($channel)[RedirectPaymentSource::Trustly->configurationKey()] ?? false);
     }
 
     private function getPayPalPaymentMethodConfig(ChannelInterface $channel): array

@@ -13,10 +13,8 @@ declare(strict_types=1);
 
 namespace Tests\Sylius\PayPalPlugin\Unit\Model;
 
-use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
-use Sylius\Component\Core\Model\AddressInterface;
 use Sylius\Component\Core\Model\OrderInterface;
 use Sylius\PayPalPlugin\Model\PayPalOrder;
 use Sylius\PayPalPlugin\Model\PayPalPurchaseUnit;
@@ -34,93 +32,53 @@ final class PayPalOrderTest extends TestCase
         $this->payPalPurchaseUnit = $this->createMock(PayPalPurchaseUnit::class);
     }
 
-    #[Test]
-    public function it_sends_the_given_experience_context_under_the_paypal_payment_source(): void
+    public function test_it_sends_the_given_payment_source_as_it_is(): void
     {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn(null);
         $this->payPalPurchaseUnit->method('toArray')->willReturn(['reference_id' => 'REFERENCE_ID']);
 
-        $experienceContext = [
-            'locale' => 'en-US',
-            'shipping_preference' => PayPalOrder::PAYPAL_ADDRESS,
-            'contact_preference' => PayPalOrder::UPDATE_CONTACT_INFO,
-            'user_action' => PayPalOrder::USER_ACTION_PAY_NOW,
-            'payment_method_preference' => PayPalOrder::PAYMENT_METHOD_PREFERENCE_IMMEDIATE,
-            'app_switch_preference' => ['launch_paypal_app' => true],
-        ];
+        $paymentSource = ['paypal' => ['experience_context' => ['locale' => 'en-US', 'user_action' => 'PAY_NOW']]];
 
         $payPalOrder = new PayPalOrder(
             order: $this->order,
             payPalPurchaseUnit: $this->payPalPurchaseUnit,
             intent: PayPalOrder::INTENT_CAPTURE,
-            experienceContext: $experienceContext,
+            paymentSource: $paymentSource,
         );
 
-        self::assertEquals([
+        self::assertSame([
             'intent' => 'CAPTURE',
             'purchase_units' => [
                 ['reference_id' => 'REFERENCE_ID'],
             ],
-            'payment_source' => [
-                'paypal' => [
-                    'experience_context' => $experienceContext,
-                ],
-            ],
+            'payment_source' => $paymentSource,
         ], $payPalOrder->toArray());
     }
 
-    #[Test]
-    public function it_sends_the_experience_context_when_the_address_is_already_provided(): void
+    public function test_it_carries_a_payment_source_other_than_paypal(): void
     {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn($this->createMock(AddressInterface::class));
-        $this->payPalPurchaseUnit->method('toArray')->willReturn(['reference_id' => 'REFERENCE_ID']);
+        $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
 
-        $experienceContext = ['shipping_preference' => PayPalOrder::PROVIDED_ADDRESS];
+        $paymentSource = ['google_pay' => ['attributes' => ['verification' => ['method' => 'SCA_WHEN_REQUIRED']]]];
 
         $payPalOrder = new PayPalOrder(
             order: $this->order,
             payPalPurchaseUnit: $this->payPalPurchaseUnit,
             intent: PayPalOrder::INTENT_CAPTURE,
-            experienceContext: $experienceContext,
+            paymentSource: $paymentSource,
         );
 
-        $result = $payPalOrder->toArray();
-
-        self::assertArrayNotHasKey('application_context', $result);
-        self::assertSame($experienceContext, $result['payment_source']['paypal']['experience_context']);
+        self::assertSame($paymentSource, $payPalOrder->toArray()['payment_source']);
     }
 
-    #[Test]
-    public function it_sends_the_fallback_experience_context_when_shipping_is_not_required(): void
+    public function test_it_never_sends_the_legacy_application_context(): void
     {
-        $this->order->method('isShippingRequired')->willReturn(false);
-        $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
-
-        $payPalOrder = new PayPalOrder($this->order, $this->payPalPurchaseUnit, PayPalOrder::INTENT_CAPTURE);
-
-        $result = $payPalOrder->toArray();
-
-        self::assertArrayNotHasKey('application_context', $result);
-        self::assertSame(
-            ['shipping_preference' => 'NO_SHIPPING', 'user_action' => 'PAY_NOW'],
-            $result['payment_source']['paypal']['experience_context'],
-        );
-    }
-
-    #[Test]
-    public function it_never_sends_the_legacy_application_context(): void
-    {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn(null);
         $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
 
         $payPalOrder = new PayPalOrder(
             order: $this->order,
             payPalPurchaseUnit: $this->payPalPurchaseUnit,
             intent: PayPalOrder::INTENT_CAPTURE,
-            experienceContext: ['shipping_preference' => PayPalOrder::PAYPAL_ADDRESS],
+            paymentSource: ['paypal' => ['experience_context' => []]],
         );
 
         $result = $payPalOrder->toArray();
@@ -129,66 +87,35 @@ final class PayPalOrderTest extends TestCase
         self::assertArrayNotHasKey('application_context', $result);
     }
 
-    #[Test]
-    public function it_builds_the_experience_context_from_the_urls_when_none_is_given(): void
+    public function test_it_sends_no_processing_instruction_unless_it_is_given_one(): void
     {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn(null);
-        $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
-
-        $payPalOrder = new PayPalOrder(
-            $this->order,
-            $this->payPalPurchaseUnit,
-            PayPalOrder::INTENT_CAPTURE,
-            'https://shop.example.com/checkout/complete',
-            'https://shop.example.com/checkout/complete',
-        );
-
-        self::assertSame([
-            'shipping_preference' => 'GET_FROM_FILE',
-            'user_action' => 'PAY_NOW',
-            'return_url' => 'https://shop.example.com/checkout/complete',
-            'cancel_url' => 'https://shop.example.com/checkout/complete',
-        ], $payPalOrder->toArray()['payment_source']['paypal']['experience_context']);
-    }
-
-    #[Test]
-    public function it_declares_the_shipping_callback_in_the_fallback_experience_context(): void
-    {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn(null);
         $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
 
         $payPalOrder = new PayPalOrder(
             order: $this->order,
             payPalPurchaseUnit: $this->payPalPurchaseUnit,
             intent: PayPalOrder::INTENT_CAPTURE,
-            shippingCallbackUrl: 'https://shop.example.com/paypal/order-shipping-callback',
+            paymentSource: ['paypal' => ['experience_context' => []]],
         );
 
-        self::assertSame([
-            'callback_events' => ['SHIPPING_ADDRESS'],
-            'callback_url' => 'https://shop.example.com/paypal/order-shipping-callback',
-        ], $payPalOrder->toArray()['payment_source']['paypal']['experience_context']['order_update_callback_config']);
+        self::assertArrayNotHasKey('processing_instruction', $payPalOrder->toArray());
     }
 
-    #[Test]
-    public function it_omits_the_shipping_callback_from_the_fallback_when_the_address_is_already_provided(): void
+    public function test_it_asks_paypal_to_complete_the_order_on_payment_approval(): void
     {
-        $this->order->method('isShippingRequired')->willReturn(true);
-        $this->order->method('getShippingAddress')->willReturn($this->createMock(AddressInterface::class));
         $this->payPalPurchaseUnit->method('toArray')->willReturn([]);
 
         $payPalOrder = new PayPalOrder(
             order: $this->order,
             payPalPurchaseUnit: $this->payPalPurchaseUnit,
             intent: PayPalOrder::INTENT_CAPTURE,
-            shippingCallbackUrl: 'https://shop.example.com/paypal/order-shipping-callback',
+            paymentSource: ['trustly' => []],
+            processingInstruction: PayPalOrder::PROCESSING_INSTRUCTION_ORDER_COMPLETE_ON_PAYMENT_APPROVAL,
         );
 
-        self::assertArrayNotHasKey(
-            'order_update_callback_config',
-            $payPalOrder->toArray()['payment_source']['paypal']['experience_context'],
+        self::assertSame(
+            'ORDER_COMPLETE_ON_PAYMENT_APPROVAL',
+            $payPalOrder->toArray()['processing_instruction'],
         );
     }
 }

@@ -30,6 +30,8 @@ use Twig\Environment;
 
 final readonly class PayPalButtonsController
 {
+    private const VENMO_COMPONENT = 'venmo-payments';
+
     /** @param OrderRepositoryInterface<OrderInterface> $orderRepository */
     public function __construct(
         private Environment $twig,
@@ -69,17 +71,55 @@ final readonly class PayPalButtonsController
         $channel = $this->channelContext->getChannel();
 
         try {
+            $locale = $this->localeProcessor->process($this->localeContext->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
             return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_product_page.html.twig', [
                 'available_countries' => $this->availableCountriesProvider->provide(),
                 'clientId' => $this->payPalConfigurationProvider->getClientId($channel),
                 'partnerAttributionId' => $this->payPalConfigurationProvider->getPartnerAttributionId($channel),
                 'createPayPalOrderFromProductUrl' => $this->router->generate('sylius_paypal_shop_add_to_cart', ['productId' => $request->attributes->getInt('productId')]),
                 'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
-                'locale' => $this->localeProcessor->process($this->localeContext->getLocaleCode()),
+                'locale' => $locale,
                 'processPayPalOrderUrl' => $this->router->generate('sylius_paypal_shop_process_paypal_order'),
                 'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
-                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig($channel, 'product-details'),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'product-details',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
                 'paylaterEnabled' => $this->getFundingSourcesConfigurationProvider()->isPayLaterEnabled($channel),
+                'venmoEnabled' => $venmoEnabled,
+            ]));
+        } catch (\InvalidArgumentException $exception) {
+            return new Response('');
+        }
+    }
+
+    public function renderProductPageVenmoButtonAction(Request $request): Response
+    {
+        /** @var ChannelInterface $channel */
+        $channel = $this->channelContext->getChannel();
+
+        try {
+            $locale = $this->localeProcessor->process($this->localeContext->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
+            return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_product_page_venmo.html.twig', [
+                'clientId' => $this->payPalConfigurationProvider->getClientId($channel),
+                'partnerAttributionId' => $this->payPalConfigurationProvider->getPartnerAttributionId($channel),
+                'createPayPalOrderFromProductUrl' => $this->router->generate('sylius_paypal_shop_add_to_cart', ['productId' => $request->attributes->getInt('productId')]),
+                'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
+                'processPayPalOrderUrl' => $this->router->generate('sylius_paypal_shop_process_paypal_order'),
+                'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'product-details',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
+                'venmoEnabled' => $venmoEnabled,
             ]));
         } catch (\InvalidArgumentException $exception) {
             return new Response('');
@@ -95,6 +135,9 @@ final readonly class PayPalButtonsController
         $order = $this->orderRepository->find($orderId);
 
         try {
+            $locale = $this->localeProcessor->process((string) $order->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
             return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_cart_page.html.twig', [
                 'available_countries' => $this->availableCountriesProvider->provide(),
                 'amount' => number_format($order->getTotal() / 100, 2, '.', ''),
@@ -102,13 +145,52 @@ final readonly class PayPalButtonsController
                 'createPayPalOrderFromCartUrl' => $this->router->generate('sylius_paypal_shop_create_paypal_order_from_cart', ['id' => $orderId]),
                 'currency' => $order->getCurrencyCode(),
                 'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
-                'locale' => $this->localeProcessor->process((string) $order->getLocaleCode()),
+                'locale' => $locale,
                 'orderId' => $orderId,
                 'partnerAttributionId' => $this->payPalConfigurationProvider->getPartnerAttributionId($channel),
                 'processPayPalOrderUrl' => $this->router->generate('sylius_paypal_shop_process_paypal_order'),
                 'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
-                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig($channel, 'cart'),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'cart',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
                 'paylaterEnabled' => $this->getFundingSourcesConfigurationProvider()->isPayLaterEnabled($channel),
+                'venmoEnabled' => $venmoEnabled,
+            ]));
+        } catch (\InvalidArgumentException $exception) {
+            return new Response('');
+        }
+    }
+
+    public function renderCartPageVenmoButtonAction(Request $request): Response
+    {
+        $orderId = $request->attributes->getInt('orderId');
+        /** @var ChannelInterface $channel */
+        $channel = $this->channelContext->getChannel();
+        /** @var OrderInterface $order */
+        $order = $this->orderRepository->find($orderId);
+
+        try {
+            $locale = $this->localeProcessor->process((string) $order->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
+            return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_cart_page_venmo.html.twig', [
+                'amount' => number_format($order->getTotal() / 100, 2, '.', ''),
+                'createPayPalOrderFromCartUrl' => $this->router->generate('sylius_paypal_shop_create_paypal_order_from_cart', ['id' => $orderId]),
+                'currency' => $order->getCurrencyCode(),
+                'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
+                'orderId' => $orderId,
+                'processPayPalOrderUrl' => $this->router->generate('sylius_paypal_shop_process_paypal_order'),
+                'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'cart',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
+                'venmoEnabled' => $venmoEnabled,
             ]));
         } catch (\InvalidArgumentException $exception) {
             return new Response('');
@@ -124,6 +206,9 @@ final readonly class PayPalButtonsController
         $order = $this->orderRepository->find($orderId);
 
         try {
+            $locale = $this->localeProcessor->process((string) $order->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
             return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_payment_page.html.twig', [
                 'available_countries' => $this->availableCountriesProvider->provide(),
                 'amount' => number_format($order->getTotal() / 100, 2, '.', ''),
@@ -133,16 +218,68 @@ final readonly class PayPalButtonsController
                 'completePayPalOrderFromPaymentPageUrl' => $this->router->generate('sylius_paypal_shop_complete_paypal_order_from_payment_page', ['id' => $orderId]),
                 'createPayPalOrderFromPaymentPageUrl' => $this->router->generate('sylius_paypal_shop_create_paypal_order_from_payment_page', ['id' => $orderId]),
                 'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
-                'locale' => $this->localeProcessor->process((string) $order->getLocaleCode()),
+                'locale' => $locale,
                 'orderId' => $orderId,
                 'partnerAttributionId' => $this->payPalConfigurationProvider->getPartnerAttributionId($channel),
                 'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
-                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig($channel, 'checkout'),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'checkout',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
                 'paylaterEnabled' => $this->getFundingSourcesConfigurationProvider()->isPayLaterEnabled($channel),
+                'venmoEnabled' => $venmoEnabled,
             ]));
         } catch (\InvalidArgumentException $exception) {
             return new Response('');
         }
+    }
+
+    public function renderPaymentPageVenmoButtonAction(Request $request): Response
+    {
+        $orderId = $request->attributes->getInt('orderId');
+        /** @var ChannelInterface $channel */
+        $channel = $this->channelContext->getChannel();
+        /** @var OrderInterface $order */
+        $order = $this->orderRepository->find($orderId);
+
+        try {
+            $locale = $this->localeProcessor->process((string) $order->getLocaleCode());
+            $venmoEnabled = $this->getFundingSourcesConfigurationProvider()->isVenmoEnabled($channel);
+
+            return new Response($this->twig->render('@SyliusPayPalPlugin/pay_from_payment_page_venmo.html.twig', [
+                'amount' => number_format($order->getTotal() / 100, 2, '.', ''),
+                'cancelPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_cancel_payment'),
+                'currency' => $order->getCurrencyCode(),
+                'completePayPalOrderFromPaymentPageUrl' => $this->router->generate('sylius_paypal_shop_complete_paypal_order_from_payment_page', ['id' => $orderId]),
+                'createPayPalOrderFromPaymentPageUrl' => $this->router->generate('sylius_paypal_shop_create_paypal_order_from_payment_page', ['id' => $orderId]),
+                'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
+                'orderId' => $orderId,
+                'webSdkScriptUrl' => $this->getWebSdkConfigurationProvider()->getScriptUrl(),
+                'webSdkInstanceConfig' => $this->getWebSdkConfigurationProvider()->getInstanceConfig(
+                    $channel,
+                    'checkout',
+                    $this->getWebSdkComponents($venmoEnabled),
+                    $locale,
+                ),
+                'venmoEnabled' => $venmoEnabled,
+            ]));
+        } catch (\InvalidArgumentException $exception) {
+            return new Response('');
+        }
+    }
+
+    /** @return array<int, string> */
+    private function getWebSdkComponents(bool $venmoEnabled): array
+    {
+        $components = PayPalWebSdkConfigurationProviderInterface::DEFAULT_COMPONENTS;
+
+        if ($venmoEnabled) {
+            $components[] = self::VENMO_COMPONENT;
+        }
+
+        return $components;
     }
 
     private function getWebSdkConfigurationProvider(): PayPalWebSdkConfigurationProviderInterface

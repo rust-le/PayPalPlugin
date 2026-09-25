@@ -5,17 +5,25 @@
         scriptUrl: context.webSdkScriptUrl,
         instanceConfig: context.webSdkInstanceConfig,
         currencyCode: context.currency,
+        amount: context.amount,
         createOrderUrl: context.createPayPalOrderUrl,
         completeOrderUrl: context.completePayPalOrderUrl,
         cancelOrderUrl: context.cancelPayPalPaymentUrl,
         errorUrl: context.errorPayPalPaymentUrl,
+        payLaterEnabled: context.paylaterEnabled,
     }) }}
-    class="mb-4"
+    class="d-grid gap-2 mb-3"
 >
     <paypal-button
         {{ stimulus_target('@sylius/paypal-plugin/paypal-payment-wallet-button', 'button') }}
         type="pay"
         class="paypal-gold"
+        style="display: block; width: 100%"
         hidden
     ></paypal-button>
+    <paypal-pay-later-button
+        {{ stimulus_target('@sylius/paypal-plugin/paypal-payment-wallet-button', 'payLaterButton') }}
+        style="display: block; width: 100%"
+        hidden
+    ></paypal-pay-later-button>
 </div>

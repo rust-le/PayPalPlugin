@@ -25,10 +25,16 @@ final readonly class PayPalPaymentPageContextProvider implements PayPalPaymentPa
 
     public const CARD_FIELDS_COMPONENT = 'card-fields';
 
+    public const GOOGLE_PAY_COMPONENT = 'googlepay-payments';
+
+    public const VENMO_COMPONENT = 'venmo-payments';
+
     public function __construct(
         private PayPalWebSdkConfigurationProviderInterface $webSdkConfigurationProvider,
         private UrlGeneratorInterface $router,
         private LocaleProcessorInterface $localeProcessor,
+        private PayPalFundingSourcesConfigurationProviderInterface $fundingSourcesConfigurationProvider,
+        private EligibleRedirectPaymentSourcesProviderInterface $eligibleRedirectPaymentSourcesProvider,
     ) {
     }
 
@@ -39,7 +45,10 @@ final readonly class PayPalPaymentPageContextProvider implements PayPalPaymentPa
         /** @var ChannelInterface $channel */
         $channel = $order->getChannel();
 
+        $processedLocale = $this->localeProcessor->process($locale);
+
         return [
+            'amount' => number_format($payment->getAmount() / 100, 2, '.', ''),
             'billingAddress' => $order->getBillingAddress(),
             'cancelPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_cancel_checkout_payment'),
             'completePayPalOrderUrl' => $this->router->generate(
@@ -52,15 +61,54 @@ final readonly class PayPalPaymentPageContextProvider implements PayPalPaymentPa
             ),
             'currency' => $order->getCurrencyCode(),
             'errorPayPalPaymentUrl' => $this->router->generate('sylius_paypal_shop_payment_error'),
+            'googlePayEnabled' => $this->fundingSourcesConfigurationProvider->isGooglePayEnabled($channel),
+            'languageCode' => $this->languageCode($locale),
+            'locale' => $processedLocale,
             'order' => $order,
             'payment' => $payment,
+            'paylaterEnabled' => $this->fundingSourcesConfigurationProvider->isPayLaterEnabled($channel),
+            'redirectPaymentSources' => $this->redirectPaymentSources($payment),
+            'venmoEnabled' => $this->fundingSourcesConfigurationProvider->isVenmoEnabled($channel),
             'webSdkInstanceConfig' => $this->webSdkConfigurationProvider->getInstanceConfig(
                 $channel,
                 self::PAGE_TYPE,
-                [...PayPalWebSdkConfigurationProviderInterface::DEFAULT_COMPONENTS, self::CARD_FIELDS_COMPONENT],
-                $this->localeProcessor->process($locale),
+                $this->components($channel),
+                $processedLocale,
             ),
             'webSdkScriptUrl' => $this->webSdkConfigurationProvider->getScriptUrl(),
         ];
+    }
+
+    /** @return array<string, string> */
+    private function redirectPaymentSources(PaymentInterface $payment): array
+    {
+        $paymentSources = [];
+
+        foreach ($this->eligibleRedirectPaymentSourcesProvider->provide($payment) as $case) {
+            $paymentSources[$case->value] = $case->iconUrl();
+        }
+
+        return $paymentSources;
+    }
+
+    private function languageCode(string $locale): string
+    {
+        return strtolower(preg_split('/[_-]/', trim($locale))[0] ?? '');
+    }
+
+    /** @return array<int, string> */
+    private function components(ChannelInterface $channel): array
+    {
+        $components = [...PayPalWebSdkConfigurationProviderInterface::DEFAULT_COMPONENTS, self::CARD_FIELDS_COMPONENT];
+
+        if ($this->fundingSourcesConfigurationProvider->isGooglePayEnabled($channel)) {
+            $components[] = self::GOOGLE_PAY_COMPONENT;
+        }
+
+        if ($this->fundingSourcesConfigurationProvider->isVenmoEnabled($channel)) {
+            $components[] = self::VENMO_COMPONENT;
+        }
+
+        return $components;
     }
 }

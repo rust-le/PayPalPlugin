@@ -29,6 +29,8 @@ class PayPalOrder
 
     public const PAYMENT_METHOD_PREFERENCE_IMMEDIATE = 'IMMEDIATE_PAYMENT_REQUIRED';
 
+    public const VERIFICATION_METHOD_SCA_WHEN_REQUIRED = 'SCA_WHEN_REQUIRED';
+
     public const CALLBACK_EVENT_SHIPPING_ADDRESS = 'SHIPPING_ADDRESS';
 
     public const KEY_SHIPPING_PREFERENCE = 'shipping_preference';
@@ -37,75 +39,36 @@ class PayPalOrder
 
     public const UPDATE_CONTACT_INFO = 'UPDATE_CONTACT_INFO';
 
+    public const PROCESSING_INSTRUCTION_ORDER_COMPLETE_ON_PAYMENT_APPROVAL = 'ORDER_COMPLETE_ON_PAYMENT_APPROVAL';
+
     /**
-     * @param array<string, mixed> $experienceContext
+     * @param array<string, mixed> $paymentSource
+     *
+     * @deprecated the $order argument is unused since Sylius/PayPalPlugin 2.1 and will be removed in Sylius/PayPalPlugin 3.0.
      */
     public function __construct(
-        private readonly OrderInterface $order,
+        OrderInterface $order,
         private readonly PayPalPurchaseUnit $payPalPurchaseUnit,
         private readonly string $intent,
-        private readonly ?string $returnUrl = null,
-        private readonly ?string $cancelUrl = null,
-        private readonly ?string $shippingCallbackUrl = null,
-        private readonly array $experienceContext = [],
+        private readonly array $paymentSource,
+        private readonly ?string $processingInstruction = null,
     ) {
     }
 
     public function toArray(): array
     {
-        return [
+        $payPalOrder = [
             'intent' => $this->intent,
             'purchase_units' => [
                 $this->payPalPurchaseUnit->toArray(),
             ],
-            'payment_source' => [
-                'paypal' => [
-                    'experience_context' => [] === $this->experienceContext
-                        ? $this->getExperienceContext($this->getShippingPreference())
-                        : $this->experienceContext,
-                ],
-            ],
-        ];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function getExperienceContext(string $shippingPreference): array
-    {
-        $experienceContext = [
-            self::KEY_SHIPPING_PREFERENCE => $shippingPreference,
-            'user_action' => self::USER_ACTION_PAY_NOW,
+            'payment_source' => $this->paymentSource,
         ];
 
-        if (null !== $this->returnUrl) {
-            $experienceContext['return_url'] = $this->returnUrl;
+        if (null !== $this->processingInstruction) {
+            $payPalOrder['processing_instruction'] = $this->processingInstruction;
         }
 
-        if (null !== $this->cancelUrl) {
-            $experienceContext['cancel_url'] = $this->cancelUrl;
-        }
-
-        if (null !== $this->shippingCallbackUrl && self::PAYPAL_ADDRESS === $shippingPreference) {
-            $experienceContext['order_update_callback_config'] = [
-                'callback_events' => [self::CALLBACK_EVENT_SHIPPING_ADDRESS],
-                'callback_url' => $this->shippingCallbackUrl,
-            ];
-        }
-
-        return $experienceContext;
-    }
-
-    private function getShippingPreference(): string
-    {
-        if ($this->order->isShippingRequired()) {
-            if (null !== $this->order->getShippingAddress()) {
-                return self::PROVIDED_ADDRESS;
-            }
-
-            return self::PAYPAL_ADDRESS;
-        }
-
-        return self::NO_SHIPPING;
+        return $payPalOrder;
     }
 }
