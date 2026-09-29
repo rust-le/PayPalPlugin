@@ -15,40 +15,117 @@ export default class extends Controller {
         cancelOrderUrl: String,
         errorUrl: String,
         loadingSelector: String,
+        liveFormSelector: String,
         payLaterEnabled: Boolean,
+        venmoEnabled: Boolean,
+        venmoButtonSelector: String,
     };
 
     syliusOrderId = null;
 
-    connect() {
-        this.init();
-    }
+    payPalOrderId = null;
 
-    async init() {
+    validationFailed = false;
+
+    initialized = false;
+
+    wiredTargets = new Set();
+
+    async connect() {
         try {
             await loadWebSdkOnce(this.scriptUrlValue);
 
-            const sdkInstance = await window.paypal.createInstance(this.instanceConfigValue);
+            this.sdkInstance = await window.paypal.createInstance(this.instanceConfigValue);
 
-            const eligibilityRequest = { currencyCode: this.currencyCodeValue };
-            if (this.hasAmountValue && this.amountValue !== '') {
-                eligibilityRequest.amount = this.amountValue;
+            await this.refreshEligibility();
+        } catch (error) {
+            console.error('PayPal Web SDK initialization error:', error);
+        } finally {
+            this.initialized = true;
+        }
+    }
+
+    amountValueChanged() {
+        if (!this.initialized) {
+            return;
+        }
+
+        this.refreshEligibility();
+    }
+
+    currencyCodeValueChanged() {
+        if (!this.initialized) {
+            return;
+        }
+
+        this.refreshEligibility();
+    }
+
+    async refreshEligibility() {
+        const eligibilityRequest = { currencyCode: this.currencyCodeValue };
+        if (this.hasAmountValue && this.amountValue !== '') {
+            eligibilityRequest.amount = this.amountValue;
+        }
+
+        let paymentMethods;
+        try {
+            paymentMethods = await this.sdkInstance.findEligibleMethods(eligibilityRequest);
+        } catch (error) {
+            console.error('PayPal eligibility check error:', error);
+
+            return;
+        }
+
+        try {
+            if (!this.wiredTargets.has('paypal') && paymentMethods.isEligible('paypal')) {
+                this.wiredTargets.add('paypal');
+                this.wireUpButton(this.paypalButtonTarget, this.sdkInstance.createPayPalOneTimePaymentSession(this.buildSessionOptions()));
             }
-            const paymentMethods = await sdkInstance.findEligibleMethods(eligibilityRequest);
+        } catch (error) {
+            console.error('PayPal button setup error:', error);
+        }
 
-            if (paymentMethods.isEligible('paypal')) {
-                this.wireUpButton(this.paypalButtonTarget, sdkInstance.createPayPalOneTimePaymentSession(this.buildSessionOptions()));
-            }
-
-            if (this.payLaterEnabledValue && this.hasPayLaterButtonTarget && paymentMethods.isEligible('paylater')) {
+        try {
+            if (
+                !this.wiredTargets.has('paylater') &&
+                this.payLaterEnabledValue &&
+                this.hasPayLaterButtonTarget &&
+                paymentMethods.isEligible('paylater')
+            ) {
+                this.wiredTargets.add('paylater');
                 const payLaterDetails = paymentMethods.getDetails('paylater');
                 this.payLaterButtonTarget.productCode = payLaterDetails.productCode;
                 this.payLaterButtonTarget.countryCode = payLaterDetails.countryCode;
-                this.wireUpButton(this.payLaterButtonTarget, sdkInstance.createPayLaterOneTimePaymentSession(this.buildSessionOptions()));
+                this.wireUpButton(this.payLaterButtonTarget, this.sdkInstance.createPayLaterOneTimePaymentSession(this.buildSessionOptions()));
             }
         } catch (error) {
-            console.error('PayPal Web SDK initialization error:', error);
+            console.error('Pay Later button setup error:', error);
         }
+
+        try {
+            const venmoButton = this.venmoEnabledValue ? this.findVenmoButton() : null;
+            if (!this.wiredTargets.has('venmo') && venmoButton !== null && paymentMethods.isEligible('venmo')) {
+                this.wiredTargets.add('venmo');
+                this.wireUpButton(venmoButton, this.sdkInstance.createVenmoOneTimePaymentSession(this.buildSessionOptions()), 'venmo');
+            }
+        } catch (error) {
+            console.error('Venmo button setup error:', error);
+        }
+    }
+
+    findVenmoButton() {
+        if (!this.hasVenmoButtonSelectorValue || this.venmoButtonSelectorValue === '') {
+            return null;
+        }
+
+        for (let scope = this.element.parentElement; scope !== null; scope = scope.parentElement) {
+            const button = scope.querySelector(this.venmoButtonSelectorValue);
+            if (button !== null) {
+                return button;
+            }
+        }
+
+        return null;
     }
 
     buildSessionOptions() {
@@ -59,39 +136,73 @@ export default class extends Controller {
         };
     }
 
-    wireUpButton(buttonTarget, paymentSession) {
+    wireUpButton(buttonTarget, paymentSession, paymentSource = null) {
         buttonTarget.removeAttribute('hidden');
         buttonTarget.addEventListener('click', async () => {
             try {
-                await paymentSession.start({ presentationMode: 'auto' }, this.createOrder());
+                await paymentSession.start({ presentationMode: 'auto' }, this.createOrder(paymentSource));
             } catch (error) {
                 console.error('paymentSession.start() failed:', error);
             }
         });
     }
 
-    async createOrder() {
+    async createOrder(paymentSource = null) {
         const requestInit = { method: 'post' };
         if (this.hasAddToCartFormSelectorValue && this.addToCartFormSelectorValue !== '') {
             requestInit.body = new FormData(document.querySelector(this.addToCartFormSelectorValue));
         }
 
-        const response = await fetch(this.createOrderUrlValue, requestInit);
-
-        if (this.hasLoadingSelectorValue && this.loadingSelectorValue !== '') {
-            document.querySelector(this.loadingSelectorValue)?.style.setProperty('display', 'block');
+        const url = new URL(this.createOrderUrlValue, window.location.origin);
+        if (paymentSource !== null) {
+            url.searchParams.set('paymentSource', paymentSource);
         }
 
-        if (response.status === 400) {
+        const response = await fetch(url, requestInit);
+
+        if (response.status === 422) {
+            this.validationFailed = true;
+            this.renderLiveForm();
+
+            throw new Error('The add to cart form is invalid.');
+        }
+
+        if (!response.ok) {
             window.location.reload();
 
             return;
         }
 
+        if (this.hasLoadingSelectorValue && this.loadingSelectorValue !== '') {
+            document.querySelector(this.loadingSelectorValue)?.style.setProperty('display', 'block');
+        }
+
         const data = await response.json();
         this.syliusOrderId = data.id;
+        this.payPalOrderId = data.orderId;
 
         return { orderId: data.orderId };
+    }
+
+    renderLiveForm() {
+        if (!this.hasLiveFormSelectorValue || this.liveFormSelectorValue === '') {
+            return;
+        }
+
+        const liveFormElement = document.querySelector(this.liveFormSelectorValue);
+        if (liveFormElement === null) {
+            return;
+        }
+
+        liveFormElement.querySelectorAll('input[name], select[name], textarea[name]').forEach((field) => {
+            if ((field.type === 'radio' || field.type === 'checkbox') && !field.checked) {
+                return;
+            }
+
+            field.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        this.application.getControllerForElementAndIdentifier(liveFormElement, 'live')?.$render();
     }
 
     async onApprove(data) {
@@ -114,7 +225,17 @@ export default class extends Controller {
     }
 
     async onError(error) {
-        await fetch(this.errorUrlValue, { method: 'post', headers: {}, body: error });
+        if (this.validationFailed) {
+            this.validationFailed = false;
+
+            return;
+        }
+
+        await fetch(this.errorUrlValue, {
+            method: 'post',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ error: String(error), payPalOrderId: this.payPalOrderId }),
+        });
         window.location.reload();
     }
 }

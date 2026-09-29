@@ -18,9 +18,13 @@ use Sylius\Component\Core\Model\CustomerInterface;
 use Sylius\Component\Core\Model\OrderInterface;
 use Sylius\Component\Core\Model\PaymentInterface;
 use Sylius\Component\Core\Model\ShipmentInterface;
+use Sylius\Component\Core\Storage\CartStorageInterface;
 use Sylius\PayPalPlugin\Payum\Action\StatusAction;
 use Sylius\PayPalPlugin\Processor\PaymentCompleteProcessorInterface;
+use Symfony\Component\BrowserKit\Cookie;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\Session\SessionFactoryInterface;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Tests\Sylius\PayPalPlugin\Service\FakeOrderDetailsApi;
 
@@ -61,6 +65,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -102,6 +107,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -144,6 +150,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         ]);
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -166,6 +173,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
 
         $orderId = $order->getId();
         $paymentId = $payment->getId();
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId, 'OTHER_PAYPAL_ORDER_ID');
         $order = $this->refreshOrder($orderId);
 
@@ -191,6 +199,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $orderId = $order->getId();
         $paymentId = $payment->getId();
         $this->clearPaymentDetails($paymentId);
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -211,9 +220,22 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         /** @var OrderInterface $order */
         $order = $fixtures['new_order'];
 
+        $this->seedCompletedOrder($order);
         $content = $this->processPayPalOrder($order->getId());
 
         $this->assertSame($this->generateUrl('sylius_shop_order_thank_you'), $content['return_url']);
+    }
+
+    public function test_it_returns_not_found_when_the_order_does_not_belong_to_the_caller(): void
+    {
+        $fixtures = $this->loadFixturesFromFiles(['resources/shop.yaml', 'resources/new_cart.yaml']);
+        /** @var OrderInterface $order */
+        $order = $fixtures['new_cart'];
+
+        // No cart seeded in the session at all - the caller owns nothing.
+        $this->processPayPalOrder($order->getId());
+
+        $this->assertSame(Response::HTTP_NOT_FOUND, $this->client->getResponse()->getStatusCode());
     }
 
     public function test_it_applies_the_shipping_method_the_buyer_picked_in_the_wallet(): void
@@ -236,6 +258,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $content = $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -265,6 +288,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -291,6 +315,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -314,6 +339,7 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->mockSuccessfulPaymentCompleteProcessor();
 
         $orderId = $order->getId();
+        $this->seedCurrentCart($order);
         $this->processPayPalOrder($orderId);
         $order = $this->refreshOrder($orderId);
 
@@ -321,6 +347,78 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
         $this->assertNotNull($shippingAddress);
         $this->assertNull($shippingAddress->getProvinceCode());
         $this->assertSame('Nowhere County', $shippingAddress->getProvinceName());
+    }
+
+    public function test_it_builds_both_addresses_from_what_the_buyer_picked_in_the_wallet(): void
+    {
+        $fixtures = $this->loadFixturesFromFiles([
+            'resources/shop.yaml',
+            'resources/shipping.yaml',
+            'resources/new_cart.yaml',
+        ]);
+        /** @var OrderInterface $order */
+        $order = $fixtures['new_cart'];
+
+        $this->mockOrderDetailsApi($this->orderDetails());
+        $this->mockSuccessfulPaymentCompleteProcessor();
+
+        $orderId = $order->getId();
+        $this->seedCurrentCart($order);
+        $this->processPayPalOrder($orderId);
+        $order = $this->refreshOrder($orderId);
+
+        $shippingAddress = $order->getShippingAddress();
+        $this->assertNotNull($shippingAddress);
+        $this->assertSame('Oliver', $shippingAddress->getFirstName());
+        $this->assertSame('Queen', $shippingAddress->getLastName());
+        $this->assertSame('1 Star City Plaza', $shippingAddress->getStreet());
+        $this->assertSame('Star City', $shippingAddress->getCity());
+        $this->assertSame('10001', $shippingAddress->getPostcode());
+        $this->assertSame('US', $shippingAddress->getCountryCode());
+        $this->assertSame('15551234567', $shippingAddress->getPhoneNumber());
+
+        $billingAddress = $order->getBillingAddress();
+        $this->assertNotNull($billingAddress);
+        $this->assertNotSame($shippingAddress->getId(), $billingAddress->getId());
+        $this->assertSame('1 Star City Plaza', $billingAddress->getStreet());
+        $this->assertSame('15551234567', $billingAddress->getPhoneNumber());
+    }
+
+    public function test_it_keeps_the_addresses_the_buyer_entered_in_checkout(): void
+    {
+        $fixtures = $this->loadFixturesFromFiles([
+            'resources/shop.yaml',
+            'resources/shipping.yaml',
+            'resources/addressed_cart.yaml',
+        ]);
+        /** @var OrderInterface $order */
+        $order = $fixtures['addressed_cart'];
+
+        $this->mockOrderDetailsApi($this->orderDetails());
+        $this->mockSuccessfulPaymentCompleteProcessor();
+
+        $orderId = $order->getId();
+        $shippingAddressId = $order->getShippingAddress()?->getId();
+        $billingAddressId = $order->getBillingAddress()?->getId();
+
+        $this->seedCurrentCart($order);
+        $this->processPayPalOrder($orderId);
+        $order = $this->refreshOrder($orderId);
+
+        $shippingAddress = $order->getShippingAddress();
+        $this->assertNotNull($shippingAddress);
+        $this->assertSame($shippingAddressId, $shippingAddress->getId());
+        $this->assertSame('1 Main St', $shippingAddress->getStreet());
+        $this->assertSame('Dallas', $shippingAddress->getCity());
+        $this->assertSame('75001', $shippingAddress->getPostcode());
+        $this->assertSame('US-TX', $shippingAddress->getProvinceCode());
+        $this->assertNull($shippingAddress->getProvinceName());
+        $this->assertNull($shippingAddress->getPhoneNumber());
+
+        $billingAddress = $order->getBillingAddress();
+        $this->assertNotNull($billingAddress);
+        $this->assertSame($billingAddressId, $billingAddress->getId());
+        $this->assertSame('US-TX', $billingAddress->getProvinceCode());
     }
 
     /**
@@ -362,6 +460,31 @@ final class ProcessPayPalOrderActionTest extends JsonApiTestCase
                 'shipping' => $shipping,
             ]],
         ];
+    }
+
+    private function seedCurrentCart(OrderInterface $order): void
+    {
+        /** @var SessionFactoryInterface $sessionFactory */
+        $sessionFactory = self::getContainer()->get('session.factory');
+        $session = $sessionFactory->createSession();
+        self::getContainer()->get('request_stack')->push(new Request());
+        self::getContainer()->get('request_stack')->getCurrentRequest()->setSession($session);
+        self::getContainer()->get(CartStorageInterface::class)->setForChannel($order->getChannel(), $order);
+        $session->save();
+        self::getContainer()->get('request_stack')->pop();
+
+        $this->client->getCookieJar()->set(new Cookie($session->getName(), $session->getId()));
+    }
+
+    private function seedCompletedOrder(OrderInterface $order): void
+    {
+        /** @var SessionFactoryInterface $sessionFactory */
+        $sessionFactory = self::getContainer()->get('session.factory');
+        $session = $sessionFactory->createSession();
+        $session->set('sylius_order_id', $order->getId());
+        $session->save();
+
+        $this->client->getCookieJar()->set(new Cookie($session->getName(), $session->getId()));
     }
 
     /** @return array<string, mixed> */
